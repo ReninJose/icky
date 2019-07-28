@@ -1,0 +1,208 @@
+#!/usr/bin/python3
+
+import os
+import sys
+import tempfile
+import shutil
+import yaml
+import subprocess
+from jinja2 import Template
+
+icky_dir = "/opt/yuck"
+ickyfile = "Ickyfile"
+icky_conf_dir = os.path.dirname(os.path.realpath(__file__))
+
+def make_spec(name, yum_requires, executables, pkg_dir, cwd):
+  specfile = """
+Name:		ickypkg-{{ name }}
+Version:	0
+Release:	0
+Summary:	{{ name }} icky package
+License:	GPL
+BuildArch:      noarch
+
+{% for req in yum_requires %}
+Requires:	{{ req }}
+{% endfor %}
+
+%define _rpmdir .
+%define _source_dir {{ cwd }}
+
+%undefine __brp_mangle_shebangs
+
+%description
+{{ name }} icky package
+
+
+%install
+
+mkdir -p %{buildroot}/usr/bin/
+{% for exe in executables %}
+cat > %{buildroot}/usr/bin/{{ exe }} << EOM
+#!/usr/bin/bash
+{{ pkg_dir }}/{{ exe }} \$@
+EOM
+chmod 0755 %{buildroot}/usr/bin/{{ exe }}
+{% endfor %}
+
+mkdir -p %{buildroot}/opt/yuck/
+ls %{_source_dir}
+cp -r %{_source_dir} %{buildroot}/opt/yuck
+
+%check
+
+%files
+{% for exe in executables %}
+/usr/bin/{{ exe }}
+{% endfor %}
+/opt/yuck/*
+"""
+  return Template(specfile).render(name=name, 
+     yum_requires=yum_requires, executables=executables, pkg_dir=pkg_dir, cwd=cwd)
+
+def get_pkg_dir(name):
+  return "{}/{}".format(icky_dir, name)
+
+def get_source(package, orig_dir, tempdir):
+  # local check
+  if package == ".":
+    ickyfile = "{}/Ickyfile".format(orig_dir)
+    sourcedir = orig_dir
+
+  # check manifest vs git
+  else:
+    _, ext = os.path.splitext(package)
+    if ext == ".git":
+      pkg_url = package
+    # read manifest
+    else:
+      pkg_index_file = \
+        read_config("{}/icky.conf".format(icky_conf_dir))['icky_pkg_index']
+      pkg_index = read_config(pkg_index_file)
+      if package in pkg_index:
+        pkg_url = pkg_index[package]['repo']
+      else:
+        print_error("error: no such package: {}".format(package))
+        exit(1)
+    # download source
+
+    os.system("pwd && git clone {}".format(pkg_url))
+    
+    # check for Ickyfile 
+    ickyfile = subprocess.check_output("ls */Ickyfile", shell=True).rstrip()
+    sourcedir = "{}/{}".format(tempdir, subprocess.check_output("ls", shell=True).rstrip().decode("utf-8"))
+  return ickyfile, sourcedir
+
+def lookup_config(config, entry):
+  if entry in config:
+    if isinstance(config[entry], list):
+      result = config[entry]
+    else:
+      result = [config[entry]]
+  else:
+    result = []
+  return result
+
+def install(package, prompt):
+
+  orig_dir = os.getcwd()
+  tempdir = tempfile.mkdtemp()
+  os.chdir(tempdir)
+
+  ickyfile, sourcedir = get_source(package, orig_dir, tempdir)
+
+  config = read_config(ickyfile)
+  pkg_name = config['name']
+  pkg_dir = get_pkg_dir(pkg_name)
+
+  require_spec = lookup_config(config, "yum_requires")
+  icky_requires = lookup_config(config, "icky_requires")
+  executables = lookup_config(config, "executables")
+  if len(executables) == 0:
+    executables = lookup_config(config, "executable")
+
+  for pkg in icky_requires:
+    install(pkg, prompt)
+  
+  os.mkdir("noarch")
+  specfile_name = "{}-icky-pkg.spec".format(pkg_name)
+  
+  with open(specfile_name, "w") as f: 
+    spec_contents = make_spec(pkg_name, require_spec,
+                              executables, pkg_dir, sourcedir)
+    print(spec_contents)
+    f.write(spec_contents)
+  
+  # rpmbuild
+  os.system("rpmbuild -ba {}".format(specfile_name))
+  os.system("pwd && ls noarch")
+  print("yum install ./noarch/* {}".format(prompt))
+  os.system("yum install ./noarch/* {}".format(prompt))
+
+  os.chdir(orig_dir)
+  shutil.rmtree(tempdir)
+  
+def remove(pkg_name, prompt):
+  pkg_dir = get_pkg_dir(pkg_name)
+  sys.stderr.write("removing icky rpm...\n")
+  os.system("yum remove ickypkg-{} {}".format(pkg_name, prompt))
+
+def read_config(ickyfile):
+  with open(ickyfile, "r") as f:
+    config = yaml.safe_load(f)
+  return config
+
+def print_error(msg):
+  sys.stderr.write("{}\n".format(msg))
+
+def stream_read_cmd_packages(argv_stream):
+  prompt = False
+  packages = []
+  while len(argv_stream) > 0:
+    arg = argv_stream.pop(0)
+    if arg == "-y":
+      prompt = True
+    else:
+      packages.append(arg)
+  return packages, prompt
+
+def main():
+  argv_stream = sys.argv[1:]
+  dispatch = False
+  packages = []
+  prompt = ""
+  if len(argv_stream) == 0:
+    print_error("icky: no arguments provided")
+    exit(1)
+  while len(argv_stream) > 0:
+    arg = argv_stream.pop(0)
+    if arg == "install":
+      if dispatch:
+        print_error("icky - conflicting arguments: {}".format(sys.argv[1]))
+        exit(1)
+      dispatch = install
+      packages, maybe_prompt = stream_read_cmd_packages(argv_stream)
+    elif arg == "remove":
+      if dispatch:
+        print_error("icky - conflicting arguments: {}".format(sys.argv[1]))
+        exit(1)
+      dispatch = remove
+      packages, maybe_prompt = stream_read_cmd_packages(argv_stream)
+    elif arg == "-y":
+      prompt = True
+    else:
+      print_error("icky - unknown argument {}".format(arg))
+      exit(1)
+  if len(packages) == 0:
+    print_error("icky: no packages specified".format())
+    exit(1)
+  if prompt or maybe_prompt:
+    prompt_arg = "-y"
+  else:
+    prompt_arg = ""
+
+  for pkg in packages:
+    dispatch(pkg, prompt_arg)
+    
+main() 
+  

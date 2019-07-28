@@ -1,0 +1,8 @@
+name: icky
+executables: icky
+yum_requires:
+  - rpm-build
+  - git
+icky_requires:
+  - https://github.com/dbenoit17/icky-pkg-index.git
+
