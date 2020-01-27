@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 
+import argparse
 import os
 import sys
 import tempfile
@@ -167,36 +168,43 @@ def stream_read_cmd_packages(argv_stream):
   return packages, prompt
 
 def main():
-  argv_stream = sys.argv[1:]
+  parser = argparse.ArgumentParser()
+  subparsers = parser.add_subparsers()
+
+  parser_install = subparsers.add_parser('install', help='installs files')
+  parser_install.add_argument(dest='install')
+
+  parser_remove = subparsers.add_parser('remove', help='removes files')
+  parser_remove.add_argument(dest='remove')
+
+  parser_y = subparsers.add_parser('-y', help='prompt message')
+
+  args = parser.parse_args()
+
   dispatch = False
   packages = []
-  prompt = ""
-  if len(argv_stream) == 0:
-    print_error("icky: no arguments provided")
-    exit(1)
-  while len(argv_stream) > 0:
-    arg = argv_stream.pop(0)
-    if arg == "install":
-      if dispatch:
-        print_error("icky - conflicting arguments: {}".format(sys.argv[1]))
-        exit(1)
-      dispatch = install
-      packages, maybe_prompt = stream_read_cmd_packages(argv_stream)
-    elif arg == "remove":
-      if dispatch:
-        print_error("icky - conflicting arguments: {}".format(sys.argv[1]))
-        exit(1)
-      dispatch = remove
-      packages, maybe_prompt = stream_read_cmd_packages(argv_stream)
-    elif arg == "-y":
-      prompt = True
-    else:
-      print_error("icky - unknown argument {}".format(arg))
+  prompt = False
+  if "install" in args:
+    packages.append(args.install)
+    if dispatch:
+      print_error("icky - conflicting arguments: intsall")
       exit(1)
+    dispatch = install
+  elif "remove" in args:
+    packages.append(args.remove)
+    if dispatch:
+      print_error("icky - conflicting arguments: remove")
+      exit(1)
+    dispatch = remove
+  elif "-y" in args:
+    prompt = True
+  else:
+    print_error("icky - unknown argument -y")
+    exit(1)
   if len(packages) == 0:
     print_error("icky: no packages specified".format())
     exit(1)
-  if prompt or maybe_prompt:
+  if prompt:
     prompt_arg = "-y"
   else:
     prompt_arg = ""
